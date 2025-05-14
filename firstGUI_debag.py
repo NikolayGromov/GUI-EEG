@@ -4,7 +4,7 @@ import pyedflib
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget,
     QPushButton, QFileDialog, QScrollArea, QSlider, 
-    QHBoxLayout, QSpinBox, QLabel, QLineEdit, QMessageBox
+    QHBoxLayout, QSpinBox, QLabel, QLineEdit, QMessageBox, QDockWidget, QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QEvent
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -41,10 +41,15 @@ class UltraCompactEEGViewer(QMainWindow):
         self.control_panel = QWidget()
         self.control_layout = QHBoxLayout()
         self.control_layout.setContentsMargins(5, 2, 5, 2)
-        
+
         self.btn_load = QPushButton("Load")
         self.btn_load.setMaximumWidth(60)
         self.btn_load.clicked.connect(self.load_edf)
+        
+        self.btn_save = QPushButton("Save")
+        self.btn_save.clicked.connect(self.save_edf)
+        self.control_layout.addWidget(self.btn_save)
+        
         
         self.time_slider = QSlider(Qt.Orientation.Horizontal)
         self.time_slider.setRange(0, 100)
@@ -121,12 +126,65 @@ class UltraCompactEEGViewer(QMainWindow):
         
         # Добавляем на панель управления
         self.control_layout.insertLayout(1, self.selection_controls)
+
+        self.normalization_factor = 2.0  # Дефолтное значение
+    
+        # Создаем контейнерный виджет для элементов управления нормализацией
+        self.norm_control_widget = QWidget()
+        self.norm_control_layout = QHBoxLayout(self.norm_control_widget)
+        self.norm_control_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.btn_norm_decrease = QPushButton("-")
+        self.btn_norm_decrease.setMaximumWidth(30)
+        self.btn_norm_decrease.clicked.connect(self.decrease_normalization)
+        
+        self.norm_label = QLabel(f"Norm: {self.normalization_factor}")
+        self.norm_label.setMinimumWidth(60)
+        
+        self.btn_norm_increase = QPushButton("+")
+        self.btn_norm_increase.setMaximumWidth(30)
+        self.btn_norm_increase.clicked.connect(self.increase_normalization)
+        
+        self.norm_control_layout.addWidget(self.btn_norm_decrease)
+        self.norm_control_layout.addWidget(self.norm_label)
+        self.norm_control_layout.addWidget(self.btn_norm_increase)
+        
+        # Добавляем виджет на панель управления (например, после zoom_spin)
+        self.control_layout.insertWidget(4, self.norm_control_widget)  # Подберите подходящую позицию
         
         # Кнопка для запуска сегментации
         self.btn_segment = QPushButton("Segment Selected")
         self.btn_segment.clicked.connect(self.segment_selected)
         self.btn_segment.setEnabled(False)
         self.control_layout.addWidget(self.btn_segment)
+
+        # Панель аннотаций (выдвижная)
+        self.annotation_dock = QDockWidget("Аннотации", self)
+        self.annotation_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | 
+                                    QDockWidget.DockWidgetFeature.DockWidgetMovable)
+        self.annotation_widget = QWidget()
+        self.annotation_layout = QVBoxLayout()
+        
+        self.annotation_list = QListWidget()
+        self.annotation_list.itemDoubleClicked.connect(self.go_to_annotation)
+        
+        self.annotation_input = QLineEdit()
+        self.annotation_input.setPlaceholderText("Текст аннотации")
+        
+        self.btn_add_annotation = QPushButton("Добавить аннотацию")
+        self.btn_add_annotation.clicked.connect(self.add_annotation)
+        
+        self.annotation_layout.addWidget(QLabel("Список аннотаций:"))
+        self.annotation_layout.addWidget(self.annotation_list)
+        self.annotation_layout.addWidget(self.annotation_input)
+        self.annotation_layout.addWidget(self.btn_add_annotation)
+        
+        self.annotation_widget.setLayout(self.annotation_layout)
+        self.annotation_dock.setWidget(self.annotation_widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.annotation_dock)
+
+        # Для работы с аннотациями EDF
+        self.edf_annotations = []
 
     def eventFilter(self, obj, event):
         """Перехватываем события клавиатуры для всего приложения"""
@@ -341,11 +399,14 @@ class UltraCompactEEGViewer(QMainWindow):
                 for i, label in enumerate(self.signal_labels)
             }
             
+            # Загрузка аннотаций
+            self.edf_annotations = self.edf_file.readAnnotations()
+            self.update_annotation_list()
             max_len = len(next(iter(self.signals.values())))
             max_time = max_len / self.sample_rates[0]
             self.time_slider.setRange(0, int(max_time - self.time_range[1]))
-            signal_copy = list(self.signals.values()).copy()
-            signal_copy.reverse()
+            # signal_copy = list(self.signals.values()).copy()
+            # signal_copy.reverse()
             #print("Right shape", np.array(signal_copy).shape)
             #self.mask = SendPredictsGUI(np.array(signal_copy), self.sample_rates[0])
             self.update_plot()
@@ -353,6 +414,36 @@ class UltraCompactEEGViewer(QMainWindow):
             
         except Exception as e:
             print(f"Error: {e}")
+
+    def save_edf(self):
+        if not self.edf_file:
+            QMessageBox.warning(self, "Ошибка", "Нет открытого EDF файла")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save EDF File", "", "EDF Files (*.edf)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            # Создаем новый EDF файл
+            writer = pyedflib.EdfWriter(file_path, len(self.signal_labels), file_type=pyedflib.FILETYPE_EDFPLUS)
+            
+            # Записываем сигналы
+            for i, label in enumerate(self.signal_labels[::-1]):
+                writer.setSignalHeader(i, self.edf_file.getSignalHeader(len(self.signal_labels)-1-i))
+                writer.writeSamples(self.signals[label])
+            
+            # Записываем аннотации
+            for ann in self.edf_annotations:
+                writer.writeAnnotation(*ann)
+            
+            writer.close()
+            QMessageBox.information(self, "Успех", "Файл успешно сохранен")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл: {str(e)}")
     
     def update_time_range(self):
         self.time_range = (self.current_position, self.current_position + self.zoom_spin.value())
@@ -361,6 +452,63 @@ class UltraCompactEEGViewer(QMainWindow):
     def format_time(self, seconds):
         """Форматирует время для встроенных меток"""
         return f"{int(seconds//3600):02d}:{int((seconds%3600)//60):02d}:{int(seconds%60):02d}"
+    
+    # Нормализация
+    
+    def increase_normalization(self):
+        """Увеличивает коэффициент нормализации на 0.5"""
+        self.normalization_factor += 0.5
+        self.update_normalization_display()
+        self.update_plot()
+
+    def decrease_normalization(self):
+        """Уменьшает коэффициент нормализации на 0.5 (но не менее 0.5)"""
+        self.normalization_factor = max(0.5, self.normalization_factor - 0.5)
+        self.update_normalization_display()
+        self.update_plot()
+
+    def update_normalization_display(self):
+        """Обновляет отображение текущего коэффициента"""
+        self.norm_label.setText(f"Norm: {self.normalization_factor:.1f}")
+
+    # Аннотации
+
+    def update_annotation_list(self):
+        self.annotation_list.clear()
+        for i in range(len(self.edf_annotations[0])):
+            start = float(self.edf_annotations[0][i])
+            duration = float(self.edf_annotations[1][i])
+            text = self.edf_annotations[2][i]
+            item = QListWidgetItem(f"{self.format_time(start)}: {text}")
+            if duration > 0:
+                item = QListWidgetItem(f"{self.format_time(start)} - {self.format_time(start+duration)}: {text}")
+            item.setData(Qt.ItemDataRole.UserRole, (start, duration, text))
+            self.annotation_list.addItem(item)
+
+    def add_annotation(self):
+        """Добавляет аннотацию к текущему выделению"""
+        if not self.selection_start or not self.selection_end:
+            QMessageBox.warning(self, "Ошибка", "Сначала выделите область")
+            return
+        
+        annotation_text = self.annotation_input.text()
+        if not annotation_text:
+            QMessageBox.warning(self, "Ошибка", "Введите текст аннотации")
+            return
+        
+        duration = self.selection_end - self.selection_start
+        self.edf_annotations.append((self.selection_start, duration, annotation_text))
+        self.update_annotation_list()
+        self.annotation_input.clear()
+        self.update_plot()
+
+    def go_to_annotation(self, item):
+        """Переходит к выбранной аннотации"""
+        start, duration, _ = item.data(Qt.ItemDataRole.UserRole)
+        self.time_range = (max(0, start - 5), start + 5)  # Показываем 10 секунд вокруг аннотации
+        self.current_position = max(0, start - 5)
+        self.time_slider.setValue(int(max(0, start - 5)))
+        self.update_plot()
     
     def update_plot(self, position=None):
         if position is not None:
@@ -381,7 +529,7 @@ class UltraCompactEEGViewer(QMainWindow):
             time = np.linspace(self.time_range[0], self.time_range[1], end-start)
             
             # Нормализация и отрисовка
-            normalized = (signal[start:end] - np.mean(signal)) / (2 * np.std(signal))# изменять по кнопке коэф
+            normalized = (signal[start:end] - np.mean(signal)) / (self.normalization_factor * np.std(signal))# изменять по кнопке коэф
             self.ax.plot(time, normalized + i, color='#1f77b4', linewidth=0.7)
             
             # Метка канала (внутри графика)
@@ -442,6 +590,55 @@ class UltraCompactEEGViewer(QMainWindow):
                 edgecolor='orange', linewidth=1
             )
         self.update_selection_rect()
+
+        
+                
+        # Отрисовка аннотаций
+        if len(self.edf_annotations) == 3:  # Проверяем структуру данных
+            starts = self.edf_annotations[0]
+            durations = self.edf_annotations[1]
+            texts = self.edf_annotations[2]
+            
+            for i in range(len(starts)):
+                try:
+                    start = float(starts[i])
+                    duration = float(durations[i])
+                    text = texts[i]
+                    end = start + duration if duration != -1 else start
+                    
+                    # Проверяем видимость аннотации
+                    if end < self.time_range[0] or start > self.time_range[1]:
+                        continue
+                        
+                    # Отрисовка в зависимости от типа аннотации
+                    if duration != -1:  # Интервальная аннотация
+                        rect = self.ax.axvspan(
+                            max(start, self.time_range[0]),
+                            min(end, self.time_range[1]),
+                            facecolor='green', alpha=0.2,
+                            edgecolor='darkgreen', linewidth=1
+                        )
+                        x_pos = (max(start, self.time_range[0]) + min(end, self.time_range[1])) / 2
+                    else:  # Точечная аннотация
+                        line = self.ax.axvline(
+                            x=start,
+                            color='green',
+                            linestyle='-',
+                            alpha=0.7,
+                            linewidth=1.5
+                        )
+                        x_pos = start
+                    
+                    # Добавляем текст аннотации
+                    self.ax.text(
+                        x_pos, len(self.signals) - 0.8, text,  # Изменили позицию по Y
+                        fontsize=8, ha='center', va='bottom',
+                        bbox=dict(facecolor='white', alpha=0.7, pad=2)
+                    )
+                    
+                except (ValueError, IndexError) as e:
+                    print(f"Ошибка обработки аннотации {i}: {e}")
+                    continue
         
         self.canvas.draw()
 
