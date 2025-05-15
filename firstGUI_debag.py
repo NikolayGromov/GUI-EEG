@@ -1,6 +1,7 @@
 import sys
 import numpy as np
 import pyedflib
+import mne
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget,
     QPushButton, QFileDialog, QScrollArea, QSlider, 
@@ -23,6 +24,7 @@ class UltraCompactEEGViewer(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         
         # Основные параметры
+        self.file_path = None
         self.edf_file = None
         self.signals = {}
         self.signal_labels = []
@@ -381,15 +383,15 @@ class UltraCompactEEGViewer(QMainWindow):
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     
     def load_edf(self):
-        file_path, _ = QFileDialog.getOpenFileName(
+        self.file_path, _ = QFileDialog.getOpenFileName(
             self, "Open EDF File", "", "EDF Files (*.edf)"
         )
         
-        if not file_path:
+        if not self.file_path:
             return
             
         try:
-            self.edf_file = pyedflib.EdfReader(file_path)
+            self.edf_file = pyedflib.EdfReader(self.file_path)
             self.signal_labels = self.edf_file.getSignalLabels()[::-1]  # Обратный порядок
             self.sample_rates = [self.edf_file.getSampleFrequency(i) for i in range(len(self.signal_labels))]
             
@@ -400,7 +402,7 @@ class UltraCompactEEGViewer(QMainWindow):
             }
             
             # Загрузка аннотаций
-            self.edf_annotations = self.edf_file.readAnnotations()
+            self.edf_annotations = list(self.edf_file.readAnnotations())
             self.update_annotation_list()
             max_len = len(next(iter(self.signals.values())))
             max_time = max_len / self.sample_rates[0]
@@ -420,30 +422,38 @@ class UltraCompactEEGViewer(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Нет открытого EDF файла")
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        save_file_path, _ = QFileDialog.getSaveFileName(
             self, "Save EDF File", "", "EDF Files (*.edf)"
         )
         
-        if not file_path:
+        if not save_file_path:
             return
         
         try:
-            # Создаем новый EDF файл
-            writer = pyedflib.EdfWriter(file_path, len(self.signal_labels), file_type=pyedflib.FILETYPE_EDFPLUS)
+            data = mne.io.read_raw_edf(self.file_path)
+            # Создаем временный raw объект из текущих данных
             
-            # Записываем сигналы
-            for i, label in enumerate(self.signal_labels[::-1]):
-                writer.setSignalHeader(i, self.edf_file.getSignalHeader(len(self.signal_labels)-1-i))
-                writer.writeSamples(self.signals[label])
+            # Добавляем аннотации если они есть
+            if hasattr(self, 'edf_annotations') and len(self.edf_annotations) == 3:
+                onsets = self.edf_annotations[0]
+                durations = np.clip(self.edf_annotations[1], a_min=0, a_max=None)
+                descriptions = self.edf_annotations[2]
+                
+                
+                annotations = mne.Annotations(
+                    onset=onsets,
+                    duration=durations,
+                    description=descriptions
+                )
+                data.set_annotations(annotations)
             
-            # Записываем аннотации
-            for ann in self.edf_annotations:
-                writer.writeAnnotation(*ann)
-            
-            writer.close()
+            # Сохраняем файл
+            data.export(save_file_path, fmt='edf', overwrite=True)
             QMessageBox.information(self, "Успех", "Файл успешно сохранен")
+            
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл: {str(e)}")
+            print(f"Ошибка сохранения: {e}")
     
     def update_time_range(self):
         self.time_range = (self.current_position, self.current_position + self.zoom_spin.value())
@@ -486,21 +496,36 @@ class UltraCompactEEGViewer(QMainWindow):
             self.annotation_list.addItem(item)
 
     def add_annotation(self):
-        """Добавляет аннотацию к текущему выделению"""
-        if not self.selection_start or not self.selection_end:
-            QMessageBox.warning(self, "Ошибка", "Сначала выделите область")
+        """Добавляет аннотации ко всем выделенным областям"""
+        if not self.selection_rects:
+            QMessageBox.warning(self, "Ошибка", "Нет выделенных областей")
             return
         
-        annotation_text = self.annotation_input.text()
+        annotation_text = self.annotation_input.text().strip()
         if not annotation_text:
             QMessageBox.warning(self, "Ошибка", "Введите текст аннотации")
             return
         
-        duration = self.selection_end - self.selection_start
-        self.edf_annotations.append((self.selection_start, duration, annotation_text))
+        # Для каждого выделенного прямоугольника добавляем аннотацию
+        for rect in self.selection_rects:
+            try:
+                # Получаем координаты прямоугольника
+                start = rect.get_x()  # Минимальная X-координата
+                duration = rect.get_width() 
+                
+                # Добавляем аннотацию в правильном формате
+                self.edf_annotations[0] = np.append(self.edf_annotations[0], start)
+                self.edf_annotations[1] = np.append(self.edf_annotations[1], duration)
+                self.edf_annotations[2] = np.append(self.edf_annotations[2], annotation_text)
+            except Exception as e:
+                print(f"Ошибка добавления аннотации: {e}")
+                continue
+        
+        # Обновляем интерфейс
         self.update_annotation_list()
         self.annotation_input.clear()
         self.update_plot()
+        QApplication.processEvents()
 
     def go_to_annotation(self, item):
         """Переходит к выбранной аннотации"""
@@ -604,14 +629,14 @@ class UltraCompactEEGViewer(QMainWindow):
                     start = float(starts[i])
                     duration = float(durations[i])
                     text = texts[i]
-                    end = start + duration if duration != -1 else start
+                    end = start + duration if duration > 0 else start
                     
                     # Проверяем видимость аннотации
                     if end < self.time_range[0] or start > self.time_range[1]:
                         continue
                         
                     # Отрисовка в зависимости от типа аннотации
-                    if duration != -1:  # Интервальная аннотация
+                    if duration > 0:  # Интервальная аннотация
                         rect = self.ax.axvspan(
                             max(start, self.time_range[0]),
                             min(end, self.time_range[1]),
