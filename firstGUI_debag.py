@@ -227,9 +227,12 @@ class UltraCompactEEGViewer(QMainWindow):
         if not self.is_selecting or event.inaxes != self.ax:
             return
         
-        # Очищаем предыдущий прямоугольник выделения
+        # # Очищаем предыдущий прямоугольник выделения
         if self.selection_rect:
             self.selection_rect.remove()
+
+        # if not self.ctrl_pressed:
+        #     self.clear_all_selections()
         
         # Рисуем новый прямоугольник выделения
         self.selection_rect = self.ax.axvspan(
@@ -243,7 +246,7 @@ class UltraCompactEEGViewer(QMainWindow):
         """Обработчик прокрутки колесика мыши"""
         if not self.signals:
             return
-        
+        self.selection_rect = None
         # Определяем направление прокрутки
         scroll_step = 1  # Шаг прокрутки в секундах
         if event.button == 'up':
@@ -306,7 +309,8 @@ class UltraCompactEEGViewer(QMainWindow):
             except:
                 continue
         self.selection_rects = []
-        self.canvas.draw_idle()
+        #self.canvas.draw_idle()
+        self.update_plot()
 
     def update_selection_rect(self):
         """Создает новое выделение и добавляет его в список"""
@@ -552,16 +556,18 @@ class UltraCompactEEGViewer(QMainWindow):
             return
         
         # Для каждого выделенного прямоугольника добавляем аннотацию
+        uniq_annots = set()
         for rect in self.selection_rects:
             try:
                 # Получаем координаты прямоугольника
                 start = rect.get_x()  # Минимальная X-координата
                 duration = rect.get_width() 
-                
-                # Добавляем аннотацию в правильном формате
-                self.edf_annotations[0] = np.append(self.edf_annotations[0], start)
-                self.edf_annotations[1] = np.append(self.edf_annotations[1], duration)
-                self.edf_annotations[2] = np.append(self.edf_annotations[2], annotation_text)
+                if (start, duration) not in uniq_annots:
+                    uniq_annots.add((start, duration))
+                    # Добавляем аннотацию в правильном формате
+                    self.edf_annotations[0] = np.append(self.edf_annotations[0], start)
+                    self.edf_annotations[1] = np.append(self.edf_annotations[1], duration)
+                    self.edf_annotations[2] = np.append(self.edf_annotations[2], annotation_text)
             except Exception as e:
                 print(f"Ошибка добавления аннотации: {e}")
                 continue
@@ -602,6 +608,8 @@ class UltraCompactEEGViewer(QMainWindow):
         self.update_plot()
     
     def update_plot(self, position=None):
+        self.selection_rect = None
+
         if position is not None:
             self.current_position = position
             self.time_range = (position, position + self.zoom_spin.value())
@@ -674,13 +682,35 @@ class UltraCompactEEGViewer(QMainWindow):
         self.ax.set_ylim(-0.5, len(self.signals)-0.5)
 
         # Добавляем отображение текущего выделения
-        if self.selection_rect and self.selection_start and self.selection_end:
-            self.selection_rect = self.ax.axvspan(
-                self.selection_start, self.selection_end,
-                facecolor='yellow', alpha=0.3,
-                edgecolor='orange', linewidth=1
-            )
-        self.update_selection_rect()
+        # Восстанавливаем все выделения из selection_rects
+        for rect in self.selection_rects:
+            try:
+                # Получаем координаты прямоугольника
+                start = rect.get_x()  # начальная координата X
+                end = start + rect.get_width()  # конечная координата X
+                
+                # Проверяем, попадает ли выделение в текущий видимый диапазон
+                if end > self.time_range[0] and start < self.time_range[1]:
+                    visible_start = max(start, self.time_range[0])
+                    visible_end = min(end, self.time_range[1])
+                    
+                    new_rect = self.ax.axvspan(
+                        visible_start, visible_end,
+                        facecolor='yellow', alpha=0.3,
+                        edgecolor='orange', linewidth=1
+                    )
+                    # Сохраняем ссылку на новый прямоугольник
+                    #self.selection_rects[self.selection_rects.index(rect)] = new_rect
+            except Exception as e:
+                print(f"Ошибка восстановления выделения: {e}")
+                continue
+        # if self.selection_rect and self.selection_start and self.selection_end:
+        #     self.selection_rect = self.ax.axvspan(
+        #         self.selection_start, self.selection_end,
+        #         facecolor='yellow', alpha=0.3,
+        #         edgecolor='orange', linewidth=1
+        #     )
+        #self.update_selection_rect()
 
         
                 
