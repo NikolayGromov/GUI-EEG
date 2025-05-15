@@ -103,7 +103,8 @@ class UltraCompactEEGViewer(QMainWindow):
         # Подключаем обработчики событий мыши
         self.canvas.mpl_connect('button_press_event', self.on_press)
         self.canvas.mpl_connect('button_release_event', self.on_release)
-        self.canvas.mpl_connect('motion_notify_event', self.on_motion)
+        self.canvas.mpl_connect('motion_notify_event', self.on_motion)  
+        self.canvas.mpl_connect('scroll_event', self.on_scroll)
 
         # Добавляем текстовые поля для ввода времени
         self.selection_controls = QHBoxLayout()
@@ -180,6 +181,10 @@ class UltraCompactEEGViewer(QMainWindow):
         self.annotation_layout.addWidget(self.annotation_list)
         self.annotation_layout.addWidget(self.annotation_input)
         self.annotation_layout.addWidget(self.btn_add_annotation)
+
+        self.btn_remove_annotation = QPushButton("Удалить аннотацию")
+        self.btn_remove_annotation.clicked.connect(self.remove_selected_annotation)
+        self.annotation_layout.addWidget(self.btn_remove_annotation)
         
         self.annotation_widget.setLayout(self.annotation_layout)
         self.annotation_dock.setWidget(self.annotation_widget)
@@ -234,6 +239,28 @@ class UltraCompactEEGViewer(QMainWindow):
         )
         self.canvas.draw_idle()
 
+    def on_scroll(self, event):
+        """Обработчик прокрутки колесика мыши"""
+        if not self.signals:
+            return
+        
+        # Определяем направление прокрутки
+        scroll_step = 1  # Шаг прокрутки в секундах
+        if event.button == 'up':
+            # Прокрутка вверх (влево)
+            new_position = max(0, self.current_position - scroll_step)
+        elif event.button == 'down':
+            # Прокрутка вниз (вправо)
+            max_position = len(next(iter(self.signals.values()))) / self.sample_rates[0] - self.zoom_spin.value()
+            new_position = min(max_position, self.current_position + scroll_step)
+        else:
+            return
+        
+        # Обновляем позицию
+        self.current_position = new_position
+        self.time_slider.setValue(int(new_position))
+        self.update_plot()
+
     def parse_time_input(self, time_str):
         """Конвертирует строку времени в секунды"""
         try:
@@ -283,6 +310,7 @@ class UltraCompactEEGViewer(QMainWindow):
 
     def update_selection_rect(self):
         """Создает новое выделение и добавляет его в список"""
+        print(len(self.selection_rects))
         if self.selection_start is not None and self.selection_end is not None:
             rect = self.ax.axvspan(
                 self.selection_start, self.selection_end,
@@ -344,6 +372,26 @@ class UltraCompactEEGViewer(QMainWindow):
             self.mask = np.zeros(full_mask_length)
         
         self.mask[start_idx:start_idx + len(selected_mask)] = selected_mask
+        # Находим все сегменты в маске и добавляем их как аннотации
+        changes = np.diff(selected_mask, prepend=0, append=0)
+        segment_starts = np.where(changes == 1)[0]
+        segment_ends = np.where(changes == -1)[0]
+        
+        # Инициализируем аннотации, если они еще не созданы
+        if len(self.edf_annotations) == 0:
+            self.edf_annotations = [np.array([]), np.array([]), np.array([])]
+        
+        # Добавляем каждую найденную область как аннотацию
+        for s, e in zip(segment_starts, segment_ends):
+            if e > s:  # Игнорируем пустые интервалы
+                start_time = (start_idx + s) / fs
+                duration = (e - s) / fs
+                self.edf_annotations[0] = np.append(self.edf_annotations[0], start_time)
+                self.edf_annotations[1] = np.append(self.edf_annotations[1], duration)
+                self.edf_annotations[2] = np.append(self.edf_annotations[2], "Network Prediction")
+    
+        # Обновляем список аннотаций
+        self.update_annotation_list()
         
         # Обновляем отображение
         self.update_plot()
@@ -356,6 +404,7 @@ class UltraCompactEEGViewer(QMainWindow):
         # Очищаем текстовые поля после сегментации
         self.start_time_edit.clear()
         self.end_time_edit.clear()
+        
     
     def setup_axes(self):
         """Полностью убираем все внешние элементы осей"""
@@ -407,10 +456,6 @@ class UltraCompactEEGViewer(QMainWindow):
             max_len = len(next(iter(self.signals.values())))
             max_time = max_len / self.sample_rates[0]
             self.time_slider.setRange(0, int(max_time - self.time_range[1]))
-            # signal_copy = list(self.signals.values()).copy()
-            # signal_copy.reverse()
-            #print("Right shape", np.array(signal_copy).shape)
-            #self.mask = SendPredictsGUI(np.array(signal_copy), self.sample_rates[0])
             self.update_plot()
             self.btn_load.setText("✓ Loaded")
             
@@ -526,6 +571,27 @@ class UltraCompactEEGViewer(QMainWindow):
         self.annotation_input.clear()
         self.update_plot()
         QApplication.processEvents()
+
+    def remove_selected_annotation(self):
+        """Удаляет выбранную аннотацию из списка"""
+        selected_items = self.annotation_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "Ошибка", "Выберите аннотацию для удаления")
+            return
+        
+        # Получаем индексы выбранных элементов (в обратном порядке, чтобы удаление не сбивало индексы)
+        selected_indices = sorted([self.annotation_list.row(item) for item in selected_items], reverse=True)
+        
+        # Удаляем аннотации из данных
+        for idx in selected_indices:
+            if len(self.edf_annotations[0]) > idx:
+                self.edf_annotations[0] = np.delete(self.edf_annotations[0], idx)
+                self.edf_annotations[1] = np.delete(self.edf_annotations[1], idx)
+                self.edf_annotations[2] = np.delete(self.edf_annotations[2], idx)
+        
+        # Обновляем список и график
+        self.update_annotation_list()
+        self.update_plot()
 
     def go_to_annotation(self, item):
         """Переходит к выбранной аннотации"""
