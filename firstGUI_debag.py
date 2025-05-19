@@ -4,8 +4,8 @@ import pyedflib
 import mne
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget,
-    QPushButton, QFileDialog, QScrollArea, QSlider, 
-    QHBoxLayout, QSpinBox, QLabel, QLineEdit, QMessageBox, QDockWidget, QListWidget, QListWidgetItem
+    QPushButton, QFileDialog, QScrollArea, QSlider, QDialogButtonBox,
+    QHBoxLayout, QSpinBox, QLabel, QLineEdit, QMessageBox, QDockWidget, QListWidget, QListWidgetItem, QDialog
 )
 from PyQt6.QtCore import Qt, QEvent
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -31,6 +31,8 @@ class UltraCompactEEGViewer(QMainWindow):
         self.sample_rates = []
         self.time_range = (0, 10)
         self.current_position = 0
+        self.start_visible_time = 0 # время начала отображения
+        self.duration_visible_time = None # длительность отображения
         self.mask = None
         
         # Настройка интерфейса
@@ -154,6 +156,10 @@ class UltraCompactEEGViewer(QMainWindow):
         
         # Добавляем виджет на панель управления (например, после zoom_spin)
         self.control_layout.insertWidget(4, self.norm_control_widget)  # Подберите подходящую позицию
+
+        self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.clicked.connect(self.select_all)
+        self.control_layout.addWidget(self.btn_select_all)
         
         # Кнопка для запуска сегментации
         self.btn_segment = QPushButton("Segment Selected")
@@ -271,6 +277,21 @@ class UltraCompactEEGViewer(QMainWindow):
             return h * 3600 + m * 60 + s
         except:
             return None
+        
+    def select_all(self):
+        """Выделяет всю запись"""
+        if not self.signals:
+            return
+        
+        # Получаем общую длительность записи
+        total_length = len(next(iter(self.signals.values()))) / self.sample_rates[0]
+        
+        # Устанавливаем значения в текстовые поля
+        self.start_time_edit.setText("00:00:00")
+        self.end_time_edit.setText(self.format_time(total_length))
+        
+        # Вызываем установку выделения
+        self.set_selection_from_text()
 
     def set_selection_from_text(self):
         """Устанавливает выделение из текстовых полей"""
@@ -435,6 +456,92 @@ class UltraCompactEEGViewer(QMainWindow):
         seconds = int(total_seconds % 60)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     
+    def show_time_selection_dialog(self, total_duration):
+        """Показывает диалог выбора временного окна для длинных записей"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Выбор временного окна")
+        layout = QVBoxLayout()
+        
+        msg = QLabel(f"Запись слишком длинная ({total_duration:.1f} часов).\nВыберите начальное время и продолжительность (макс. 2 часа):")
+        layout.addWidget(msg)
+        
+        # Выбор начального времени
+        start_layout = QHBoxLayout()
+        start_layout.addWidget(QLabel("Начальное время (ЧЧ:ММ:СС):"))
+        self.start_time_edit_dialog = QLineEdit("00:00:00")
+        start_layout.addWidget(self.start_time_edit_dialog)
+        layout.addLayout(start_layout)
+        
+        # Выбор продолжительности
+        duration_layout = QHBoxLayout()
+        duration_layout.addWidget(QLabel("Продолжительность (макс. 01:00:00):"))
+        self.duration_edit_dialog = QLineEdit("01:00:00")
+        duration_layout.addWidget(self.duration_edit_dialog)
+        layout.addLayout(duration_layout)
+        
+        # Кнопки
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            try:
+                start_time = self.parse_time_input(self.start_time_edit_dialog.text())
+                duration = self.parse_time_input(self.duration_edit_dialog.text())
+                
+                # Проверяем ограничения
+                if start_time < 0:
+                    start_time = 0
+                if duration > 3600:  # 2 часа в секундах
+                    duration = 3600
+                if start_time + duration > total_duration * 3600:
+                    start_time = max(0, total_duration * 3600 - duration)
+                    
+                return start_time, duration
+            except:
+                return 0, min(3600, total_duration * 3600)  # Значения по умолчанию при ошибке
+        
+        return 0, min(3600, total_duration * 3600)  # Значения по умолчанию при отмене
+    
+
+    def filter_annotations(self, annotations, start_sec, duration_sec):
+        """Фильтрует аннотации по выбранному временному окну
+        Параметры:
+            annotations - сырые аннотации из EDF (кортеж из 3 массивов)
+            start_sec - начало временного окна в секундах
+            duration_sec - длительность окна в секундах
+        Возвращает:
+            Отфильтрованные аннотации в том же формате
+        """
+        if len(annotations) != 3:  # Проверка формата аннотаций
+            return [np.array([]), np.array([]), np.array([])]
+        
+        end_sec = start_sec + duration_sec
+        filtered = [[], [], []]  # Для новых onset, duration, description
+        
+        for onset, duration, description in zip(*annotations):
+            onset = float(onset)
+            duration = float(duration)
+            annotation_end = onset + duration
+            
+            # Проверяем пересечение аннотации с выбранным окном
+            if (start_sec <= onset <= end_sec) or \
+            (start_sec <= annotation_end <= end_sec) or \
+            (onset <= start_sec and annotation_end >= end_sec):
+                
+                # Корректируем время относительно начала окна
+                new_onset = max(0, onset - start_sec)
+                new_duration = min(duration, end_sec - new_onset - start_sec)
+                
+                filtered[0].append(new_onset)
+                filtered[1].append(new_duration)
+                filtered[2].append(description)
+        
+        return [np.array(filtered[0]), np.array(filtered[1]), np.array(filtered[2])]
+
     def load_edf(self):
         self.file_path, _ = QFileDialog.getOpenFileName(
             self, "Open EDF File", "", "EDF Files (*.edf)"
@@ -445,18 +552,41 @@ class UltraCompactEEGViewer(QMainWindow):
             
         try:
             self.edf_file = pyedflib.EdfReader(self.file_path)
-            self.signal_labels = self.edf_file.getSignalLabels()[::-1]  # Обратный порядок
+            self.signal_labels = self.edf_file.getSignalLabels()[::-1]
             self.sample_rates = [self.edf_file.getSampleFrequency(i) for i in range(len(self.signal_labels))]
             
             # Загрузка данных
-            self.signals = {
-                label: self.edf_file.readSignal(len(self.signal_labels)-1-i)
-                for i, label in enumerate(self.signal_labels)
-            }
+            # Получаем длительность записи (берем первый канал как эталон)
+            n_samples = self.edf_file.getNSamples()[0]
+            total_duration = (n_samples / self.sample_rates[0]) / 3600  # В часах
             
-            # Загрузка аннотаций
-            self.edf_annotations = list(self.edf_file.readAnnotations())
+            # Для записей длиннее 2 часов - предлагаем выбрать окно
+            if total_duration > 1:
+                self.start_visible_time, self.duration_visible_time = self.show_time_selection_dialog(total_duration)                
+                
+                # Загружаем только выбранный диапазон
+                self.signals = {}
+                for i, label in enumerate(self.signal_labels):
+                    signal = self.edf_file.readSignal(len(self.signal_labels)-1-i,
+                                                    start=int(self.start_visible_time * self.sample_rates[i]),
+                                                    n=int(self.duration_visible_time * self.sample_rates[i]))
+                    self.signals[label] = signal
+            else:
+                # Загружаем полностью
+                self.signals = {
+                    label: self.edf_file.readSignal(len(self.signal_labels)-1-i)
+                    for i, label in enumerate(self.signal_labels)
+                }
+            
+            # Загрузка аннотаций (только для выбранного диапазона)
+            raw_annotations = list(self.edf_file.readAnnotations())
+            self.edf_annotations = self.filter_annotations(
+                raw_annotations,
+                self.start_visible_time if total_duration > 1 else 0,  # Начало выбранного окна
+                self.duration_visible_time if total_duration > 1 else total_duration  # Длительность окна
+            )
             self.update_annotation_list()
+            
             max_len = len(next(iter(self.signals.values())))
             max_time = max_len / self.sample_rates[0]
             self.time_slider.setRange(0, int(max_time - self.time_range[1]))
@@ -464,7 +594,9 @@ class UltraCompactEEGViewer(QMainWindow):
             self.btn_load.setText("✓ Loaded")
             
         except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Error: {e}")
             print(f"Error: {e}")
+    
 
     def save_edf(self):
         if not self.edf_file:
@@ -481,10 +613,13 @@ class UltraCompactEEGViewer(QMainWindow):
         try:
             data = mne.io.read_raw_edf(self.file_path)
             # Создаем временный raw объект из текущих данных
+            # Обрезаем запись до выбранного временного окна
+            #if self.start_visible_time != 0 and self.duration_visible_time != 0:
+            #    data.crop(tmin=self.start_visible_time, tmax=self.start_visible_time + self.duration_visible_time)
             
             # Добавляем аннотации если они есть
             if hasattr(self, 'edf_annotations') and len(self.edf_annotations) == 3:
-                onsets = self.edf_annotations[0]
+                onsets = [onset + self.start_visible_time for onset in self.edf_annotations[0]]
                 durations = np.clip(self.edf_annotations[1], a_min=0, a_max=None)
                 descriptions = self.edf_annotations[2]
                 
@@ -638,21 +773,21 @@ class UltraCompactEEGViewer(QMainWindow):
                 fontsize=8, ha='left', va='center',
                 bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0)
             )
-        # отрисовка маски
-        if self.mask is not None:
-            changes = np.diff(self.mask[start:end], prepend=0, append=0)
-            starts = np.where(changes == 1)[0]
-            ends = np.where(changes == -1)[0]
-            for s, e in zip(starts, ends):
-                if e > s and e < len(time):  # Игнорируем пустые интервалы
-                    self.ax.fill_betweenx(
-                        y=[-0.5, len(self.signals)-0.5],  # Заливка по всем каналам
-                        x1=time[s],
-                        x2=time[e],
-                        facecolor='red',
-                        alpha=0.3,
-                        edgecolor='none'
-                    )
+        # # отрисовка маски
+        # if self.mask is not None:
+        #     changes = np.diff(self.mask[start:end], prepend=0, append=0)
+        #     starts = np.where(changes == 1)[0]
+        #     ends = np.where(changes == -1)[0]
+        #     for s, e in zip(starts, ends):
+        #         if e > s and e < len(time):  # Игнорируем пустые интервалы
+        #             self.ax.fill_betweenx(
+        #                 y=[-0.5, len(self.signals)-0.5],  # Заливка по всем каналам
+        #                 x1=time[s],
+        #                 x2=time[e],
+        #                 facecolor='red',
+        #                 alpha=0.3,
+        #                 edgecolor='none'
+        #             )
 
         margin = (self.time_range[1] - self.time_range[0]) * 0.02
         for t in range(int(self.time_range[0]), int(self.time_range[1]) + 1, 5):
