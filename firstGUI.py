@@ -337,7 +337,6 @@ class UltraCompactEEGViewer(QMainWindow):
 
     def update_selection_rect(self):
         """Создает новое выделение и добавляет его в список"""
-        print(len(self.selection_rects))
         if self.selection_start is not None and self.selection_end is not None:
             rect = self.ax.axvspan(
                 self.selection_start, self.selection_end,
@@ -561,6 +560,8 @@ class UltraCompactEEGViewer(QMainWindow):
             n_samples = self.edf_file.getNSamples()[0]
             total_duration = (n_samples / self.sample_rates[0]) / 3600  # В часах
             
+            # Загрузка аннотаций (только для выбранного диапазона)
+            raw_annotations = list(self.edf_file.readAnnotations())
             # Для записей длиннее 2 часов - предлагаем выбрать окно
             if total_duration > 1:
                 self.start_visible_time, self.duration_visible_time = self.show_time_selection_dialog(total_duration)                
@@ -572,20 +573,20 @@ class UltraCompactEEGViewer(QMainWindow):
                                                     start=int(self.start_visible_time * self.sample_rates[i]),
                                                     n=int(self.duration_visible_time * self.sample_rates[i]))
                     self.signals[label] = signal
+                self.edf_annotations = self.filter_annotations(
+                    raw_annotations,
+                    self.start_visible_time if total_duration > 1 else 0,  # Начало выбранного окна
+                    self.duration_visible_time if total_duration > 1 else total_duration  # Длительность окна
+                )
             else:
                 # Загружаем полностью
                 self.signals = {
                     label: self.edf_file.readSignal(len(self.signal_labels)-1-i)
                     for i, label in enumerate(self.signal_labels)
                 }
+                self.edf_annotations = raw_annotations
             
-            # Загрузка аннотаций (только для выбранного диапазона)
-            raw_annotations = list(self.edf_file.readAnnotations())
-            self.edf_annotations = self.filter_annotations(
-                raw_annotations,
-                self.start_visible_time if total_duration > 1 else 0,  # Начало выбранного окна
-                self.duration_visible_time if total_duration > 1 else total_duration  # Длительность окна
-            )
+            
             self.update_annotation_list()
             
             max_len = len(next(iter(self.signals.values())))
