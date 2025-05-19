@@ -1,2 +1,1 @@
-# GUI-EEG
-GUI EEG
+Segmenter for IED
