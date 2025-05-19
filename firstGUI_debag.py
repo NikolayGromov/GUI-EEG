@@ -1,3 +1,6 @@
+import os
+os.environ["MNE_USE_LAZY_IMPORT"] = "0"
+
 import sys
 import numpy as np
 import pyedflib
@@ -614,8 +617,7 @@ class UltraCompactEEGViewer(QMainWindow):
             data = mne.io.read_raw_edf(self.file_path)
             # Создаем временный raw объект из текущих данных
             # Обрезаем запись до выбранного временного окна
-            #if self.start_visible_time != 0 and self.duration_visible_time != 0:
-            #    data.crop(tmin=self.start_visible_time, tmax=self.start_visible_time + self.duration_visible_time)
+            
             
             # Добавляем аннотации если они есть
             if hasattr(self, 'edf_annotations') and len(self.edf_annotations) == 3:
@@ -630,6 +632,9 @@ class UltraCompactEEGViewer(QMainWindow):
                     description=descriptions
                 )
                 data.set_annotations(annotations)
+                
+            # if self.start_visible_time != 0 and self.duration_visible_time != 0:
+            #    data.crop(tmin=self.start_visible_time, tmax=self.start_visible_time + self.duration_visible_time)
             
             # Сохраняем файл
             data.export(save_file_path, fmt='edf', overwrite=True)
