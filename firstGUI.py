@@ -462,7 +462,7 @@ class UltraCompactEEGViewer(QMainWindow):
         dialog.setWindowTitle("Выбор временного окна")
         layout = QVBoxLayout()
         
-        msg = QLabel(f"Запись слишком длинная ({total_duration:.1f} часов).\nВыберите начальное время и продолжительность (макс. 2 часа):")
+        msg = QLabel(f"Запись слишком длинная ({total_duration:.1f} часов).\nВыберите начальное время и продолжительность (макс. 1 час):")
         layout.addWidget(msg)
         
         # Выбор начального времени
